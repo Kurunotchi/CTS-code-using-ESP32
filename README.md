@@ -50,9 +50,37 @@ Software Dependencies
 Install these libraries via Arduino Library Manager:
 
 Keypad
+
 LiquidCrystal_I2C
+
 INA226
+
 WiFi
+
 Preferences
+
 ESP_Google_Sheet_Client
+
 ArduinoJson
+
+Academic Context
+
+This project was developed as a capstone requirement for the Bachelor of Science in Electrical Engineering program at Palawan State University (PalSU). It demonstrates:
+
+Power Electronics: Battery charging/discharging circuits
+
+Embedded Systems: ESP32 programming and real-time control
+
+Data Acquisition: INA226 sensor interfacing
+
+Cloud Integration: Google Sheets API implementation
+
+Numerical Methods: Simpson's Rule for capacity calculation
+
+UI/UX Design: LCD and keypad interface design
+
+Project Team
+
+Student Researchers: Thirdy Randale D. Mangcucang, Jemuel Gabayno, and Lexus Gavilo.
+
+Technical Consultant: Kurunotchi
