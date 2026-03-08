@@ -1,4 +1,5 @@
 ESP32 Battery Capacity Testing Station (CTS)
+
 A comprehensive 4-channel battery capacity tester for 18650 and other Li-ion cells, featuring real-time monitoring, cycle testing, and cloud logging to Google Sheets.
 
 Features
@@ -43,3 +44,15 @@ Slot B: BMS (18), BCD (5)
 Slot C: AMS (17), ACD (16)
 
 Slot D: CMS (32), CCD (33)
+
+Software Dependencies
+
+Install these libraries via Arduino Library Manager:
+
+Keypad
+LiquidCrystal_I2C
+INA226
+WiFi
+Preferences
+ESP_Google_Sheet_Client
+ArduinoJson
