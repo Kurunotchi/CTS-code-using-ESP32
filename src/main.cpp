@@ -10,16 +10,15 @@
 #include <ArduinoJson.h>  
 
 const char* ssid = "Kodicpogi21";
-const char* pass = "11123232";
-
+const char* pass = "11123232";  
 
 WiFiServer tcpServer(8888);  
 WiFiClient client;
 bool clientConnected = false;
 unsigned long lastWiFiDataSend = 0;
-const unsigned long wifiDataInterval = 3000; 
+const unsigned long wifiDataInterval = 5000;  // Increased to 5 seconds
 unsigned long previousStatusTime = 0;
-const unsigned long statusInterval = 3000; 
+const unsigned long statusInterval = 5000;  // Increased to 5 seconds
 
 void connectToWiFi() {
   WiFi.begin(ssid, pass);
@@ -84,7 +83,7 @@ float voltageCalDdischarge = 1.0305;
 float voltageCalDcharge = 0.9875;
 
 unsigned long prevA = 0, prevB = 0, prevC = 0, prevD = 0;
-const unsigned long interval = 3000; 
+const unsigned long interval = 2000;  // Reduced to 2 seconds
 
 char previousSlot = '\0';
 bool inSettingScreen = false;
@@ -133,70 +132,18 @@ bool CdischargeWait = false, DdischargeWait = false;
 unsigned long AdischargeStart = 0, BdischargeStart = 0;
 unsigned long CdischargeStart = 0, DdischargeStart = 0;
 
-unsigned long elapsedA = 0, elapsedB = 0, elapsedC = 0, elapsedD = 0;
+// Elapsed time in minutes (0, 60, 120, 180, etc.)
+unsigned long elapsedMinutesA = 0, elapsedMinutesB = 0, elapsedMinutesC = 0, elapsedMinutesD = 0;
+unsigned long lastMinuteMarkA = 0, lastMinuteMarkB = 0, lastMinuteMarkC = 0, lastMinuteMarkD = 0;
 
 const float CHARGE_STOP_V = 4.10;   
 const float DISCHARGE_STOP_V = 2.80; 
 
-// SIMPSON'S RULE VARIABLES 
-// Capacity tracking in milliamp-hours (mAh)
+// Simplified capacity tracking using trapezoidal rule
 float capacityA = 0, capacityB = 0, capacityC = 0, capacityD = 0;
-
-struct SimpsonSample {
-  unsigned long time;  
-  float current;     
-};
-
-#define MAX_SAMPLES 1000
-
-SimpsonSample samplesA[MAX_SAMPLES];
-SimpsonSample samplesB[MAX_SAMPLES];
-SimpsonSample samplesC[MAX_SAMPLES];
-SimpsonSample samplesD[MAX_SAMPLES];
-
-int sampleCountA_cum = 0;
-int sampleCountB_cum = 0;
-int sampleCountC_cum = 0;
-int sampleCountD_cum = 0;
-
+unsigned long lastCapTimeA = 0, lastCapTimeB = 0, lastCapTimeC = 0, lastCapTimeD = 0;
+float lastCapCurrentA = 0, lastCapCurrentB = 0, lastCapCurrentC = 0, lastCapCurrentD = 0;
 bool capacityTrackingA = false, capacityTrackingB = false, capacityTrackingC = false, capacityTrackingD = false;
-
-float calculateCumulativeSimpson(SimpsonSample* samples, int count) {
-  if (count < 2) return 0.0;  
-  float totalCapacity = 0.0;
-  
-  if (count == 2) {
-    float dt = (samples[1].time - samples[0].time) / 3600000.0;  
-    totalCapacity = dt * (samples[0].current + samples[1].current) / 2.0;
-    return totalCapacity;
-  }
-  
-  for (int i = 0; i < count - 2; i += 2) {
-    if (i + 2 < count) {
-      float dt1 = (samples[i+1].time - samples[i].time) / 3600000.0;
-      float dt2 = (samples[i+2].time - samples[i+1].time) / 3600000.0;
-      
-      if (abs(dt1 - dt2) < 0.0001) {
-        // Use Simpson's 1/3 rule
-        float h = dt1;  // or dt2
-        float segment = (h / 3.0) * (samples[i].current + 4 * samples[i+1].current + samples[i+2].current);
-        totalCapacity += segment;
-      } else {
-        float seg1 = dt1 * (samples[i].current + samples[i+1].current) / 2.0;
-        float seg2 = dt2 * (samples[i+1].current + samples[i+2].current) / 2.0;
-        totalCapacity += (seg1 + seg2);
-      }
-    }
-  }
-  if (count % 2 == 0) {
-    int last = count - 2;
-    float dt = (samples[last+1].time - samples[last].time) / 3600000.0;
-    float segment = dt * (samples[last].current + samples[last+1].current) / 2.0;
-    totalCapacity += segment;
-  }
-  
-  return totalCapacity;
-}
 
 Preferences prefs;
 
@@ -216,10 +163,24 @@ const char PRIVATE_KEY[] PROGMEM =
 unsigned long lastRead = 0;
 const unsigned long readInterval = 3000;   
 unsigned long lastLogA = 0, lastLogB = 0, lastLogC = 0, lastLogD = 0;
-const unsigned long logInterval = 60000;  
+const unsigned long logInterval = 60000;  // 1 minute (60,000 ms) - for minute-by-minute logging
 
 bool wasConnected = false;
 bool gsheetReadyOnce = false;
+
+// LCD update optimization
+unsigned long lastLCDUpdate = 0;
+const unsigned long lcdUpdateInterval = 500;  // Update LCD every 500ms
+char lastDisplayedSlot = '\0';
+
+// Sensor reading optimization
+unsigned long lastSensorRead = 0;
+const unsigned long sensorReadInterval = 1000;  // Read all sensors every 1 second
+int currentSensor = 0;
+
+// TCP send optimization
+unsigned long lastTCPSend = 0;
+int tcpSendCounter = 0;
 
 void resetSlotBooleans(char slot);
 void setupSensor(INA226 &sensor, const char* label);
@@ -247,10 +208,12 @@ int battNumForSlot(char slot);
 void startDischargeWithDelay(char slot);
 void startCycle(char slot);
 void formatDateTime(const char* fmt, char* result, size_t size);
-void logSlotToSheet(const char* sheetId, const String& slotStatus, int battNum, unsigned long elapsedSecs, float voltage, float current, float capacity, bool inCycle = false, const char* operationMode = "None");
+void logSlotToSheet(const char* sheetId, const String& slotStatus, int battNum, unsigned long elapsedMinutes, float voltage, float current, float capacity, bool inCycle = false, const char* operationMode = "None");
 void stopOperation(char slot, bool fromForceStop = false);
-void calculateSimpsonCapacity(char slot, float current, unsigned long currentTime);
+void calculateCapacity(char slot, float current, unsigned long currentTime);
 void resetCapacity(char slot);
+void readAllSensors();
+void updateElapsedTime();
 
 void startTCPServer() {
     tcpServer.begin();
@@ -282,16 +245,22 @@ void checkTCPClient() {
 void sendSensorDataOverTCP(char slot) {
     if (!clientConnected) return;
     
+    if (millis() - lastTCPSend < 2000) return;  // Send every 2 seconds max
+    
+    lastTCPSend = millis();
+    tcpSendCounter++;
+    
     StaticJsonDocument<300> doc;
     
     int bn = 0;
     float v = 0, c = 0, cap = 0;
     String mode = "";
     int cycleCurrent = 0, cycleTarget = 0;
+    unsigned long elapsedMins = 0;
     
     switch(slot) {
         case 'A':
-            bn = battNumA; v = voltageA; c = currentA; cap = capacityA;
+            bn = battNumA; v = voltageA; c = currentA; cap = capacityA; elapsedMins = elapsedMinutesA;
             if (Acharge) mode = "CHARGING";
             else if (Adischarge) mode = "DISCHARGING";
             else if (Acycle) mode = "CYCLE";
@@ -300,7 +269,7 @@ void sendSensorDataOverTCP(char slot) {
             cycleTarget = cycleTargetA;
             break;
         case 'B':
-            bn = battNumB; v = voltageB; c = currentB; cap = capacityB;
+            bn = battNumB; v = voltageB; c = currentB; cap = capacityB; elapsedMins = elapsedMinutesB;
             if (Bcharge) mode = "CHARGING";
             else if (Bdischarge) mode = "DISCHARGING";
             else if (Bcycle) mode = "CYCLE";
@@ -309,7 +278,7 @@ void sendSensorDataOverTCP(char slot) {
             cycleTarget = cycleTargetB;
             break;
         case 'C':
-            bn = battNumC; v = voltageC; c = currentC; cap = capacityC;
+            bn = battNumC; v = voltageC; c = currentC; cap = capacityC; elapsedMins = elapsedMinutesC;
             if (Ccharge) mode = "CHARGING";
             else if (Cdischarge) mode = "DISCHARGING";
             else if (Ccycle) mode = "CYCLE";
@@ -318,7 +287,7 @@ void sendSensorDataOverTCP(char slot) {
             cycleTarget = cycleTargetC;
             break;
         case 'D':
-            bn = battNumD; v = voltageD; c = currentD; cap = capacityD;
+            bn = battNumD; v = voltageD; c = currentD; cap = capacityD; elapsedMins = elapsedMinutesD;
             if (Dcharge) mode = "CHARGING";
             else if (Ddischarge) mode = "DISCHARGING";
             else if (Dcycle) mode = "CYCLE";
@@ -335,6 +304,7 @@ void sendSensorDataOverTCP(char slot) {
     doc["voltage"] = v;
     doc["current"] = c;
     doc["capacity"] = cap;
+    doc["elapsed_minutes"] = elapsedMins;
     doc["mode"] = mode;
     doc["cycle_current"] = cycleCurrent;
     doc["cycle_target"] = cycleTarget;
@@ -344,79 +314,39 @@ void sendSensorDataOverTCP(char slot) {
     client.println(output);
 }
 
-void sendSimpsonDataOverTCP(char slot) {
+void sendCapacityDataOverTCP(char slot) {
     if (!clientConnected) return;
     
-    StaticJsonDocument<400> doc;
-    JsonArray samples = doc.createNestedArray("samples");
+    // Send capacity data less frequently (every 10th send)
+    if (tcpSendCounter % 10 != 0) return;
+    
+    StaticJsonDocument<200> doc;
+    
+    doc["type"] = "capacity_data";
+    doc["slot"] = String(slot);
     
     switch(slot) {
         case 'A':
-            if (sampleCountA_cum >= 3) {
-                JsonObject s1 = samples.createNestedObject();
-                s1["time"] = samplesA[sampleCountA_cum-3].time;
-                s1["current"] = samplesA[sampleCountA_cum-3].current;
-                JsonObject s2 = samples.createNestedObject();
-                s2["time"] = samplesA[sampleCountA_cum-2].time;
-                s2["current"] = samplesA[sampleCountA_cum-2].current;
-                JsonObject s3 = samples.createNestedObject();
-                s3["time"] = samplesA[sampleCountA_cum-1].time;
-                s3["current"] = samplesA[sampleCountA_cum-1].current;
-                doc["capacity"] = capacityA;
-            }
+            doc["capacity"] = capacityA;
+            doc["elapsed_minutes"] = elapsedMinutesA;
             break;
         case 'B':
-            if (sampleCountB_cum >= 3) {
-                JsonObject s1 = samples.createNestedObject();
-                s1["time"] = samplesB[sampleCountB_cum-3].time;
-                s1["current"] = samplesB[sampleCountB_cum-3].current;
-                JsonObject s2 = samples.createNestedObject();
-                s2["time"] = samplesB[sampleCountB_cum-2].time;
-                s2["current"] = samplesB[sampleCountB_cum-2].current;
-                JsonObject s3 = samples.createNestedObject();
-                s3["time"] = samplesB[sampleCountB_cum-1].time;
-                s3["current"] = samplesB[sampleCountB_cum-1].current;
-                doc["capacity"] = capacityB;
-            }
+            doc["capacity"] = capacityB;
+            doc["elapsed_minutes"] = elapsedMinutesB;
             break;
         case 'C':
-            if (sampleCountC_cum >= 3) {
-                JsonObject s1 = samples.createNestedObject();
-                s1["time"] = samplesC[sampleCountC_cum-3].time;
-                s1["current"] = samplesC[sampleCountC_cum-3].current;
-                JsonObject s2 = samples.createNestedObject();
-                s2["time"] = samplesC[sampleCountC_cum-2].time;
-                s2["current"] = samplesC[sampleCountC_cum-2].current;
-                JsonObject s3 = samples.createNestedObject();
-                s3["time"] = samplesC[sampleCountC_cum-1].time;
-                s3["current"] = samplesC[sampleCountC_cum-1].current;
-                doc["capacity"] = capacityC;
-            }
+            doc["capacity"] = capacityC;
+            doc["elapsed_minutes"] = elapsedMinutesC;
             break;
         case 'D':
-            if (sampleCountD_cum >= 3) {
-                JsonObject s1 = samples.createNestedObject();
-                s1["time"] = samplesD[sampleCountD_cum-3].time;
-                s1["current"] = samplesD[sampleCountD_cum-3].current;
-                JsonObject s2 = samples.createNestedObject();
-                s2["time"] = samplesD[sampleCountD_cum-2].time;
-                s2["current"] = samplesD[sampleCountD_cum-2].current;
-                JsonObject s3 = samples.createNestedObject();
-                s3["time"] = samplesD[sampleCountD_cum-1].time;
-                s3["current"] = samplesD[sampleCountD_cum-1].current;
-                doc["capacity"] = capacityD;
-            }
+            doc["capacity"] = capacityD;
+            doc["elapsed_minutes"] = elapsedMinutesD;
             break;
     }
     
-    if (samples.size() > 0) {
-        doc["type"] = "simpson_samples";
-        doc["slot"] = String(slot);
-        
-        String output;
-        serializeJson(doc, output);
-        client.println(output);
-    }
+    String output;
+    serializeJson(doc, output);
+    client.println(output);
 }
 
 void handleTCPCommands() {
@@ -447,7 +377,6 @@ void handleTCPCommands() {
                         case '1': { // Charge
                             if (battNumForSlot(slotChar) > 0) {
                                 updateSlotRelays(slotChar, '1');
-                                // Log to sheets
                                 char sheetId[50];
                                 float v = 0, c = 0, cap = 0;
                                 if (slotChar == 'A') { strcpy(sheetId, SHEET_ID_A); v = voltageA; c = currentA; cap = capacityA; }
@@ -506,7 +435,7 @@ void handleTCPCommands() {
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial.println("System Starting...");
 
   prefs.begin("battNums", false);
@@ -529,9 +458,10 @@ void setup() {
   WiFi.persistent(true);
   connectToWiFi();
 
-    if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED) {
     startTCPServer();
   }
+  
   prefs.begin("cts", false);
   battNumA = prefs.getInt("A_num", 0);
   battNumB = prefs.getInt("B_num", 0);
@@ -539,6 +469,10 @@ void setup() {
   battNumD = prefs.getInt("D_num", 0);
 
   Acycle = Bcycle = Ccycle = Dcycle = false;
+
+  // Initialize elapsed minutes
+  elapsedMinutesA = elapsedMinutesB = elapsedMinutesC = elapsedMinutesD = 0;
+  lastMinuteMarkA = lastMinuteMarkB = lastMinuteMarkC = lastMinuteMarkD = millis();
 
   showHome();
 
@@ -585,34 +519,83 @@ void setup() {
   Serial.println("Setup complete.");
 }
 
-void calculateSimpsonCapacity(char slot, float current, unsigned long currentTime) {
-  SimpsonSample* samples;
-  int* sampleCount;
+void updateElapsedTime() {
+  unsigned long now = millis();
+  
+  // Update elapsed minutes for active slots
+  if (Acharge || Adischarge || Acycle) {
+    if (now - lastMinuteMarkA >= 60000) { // 1 minute passed
+      elapsedMinutesA += 60; // Add 60 minutes (1 hour in minutes scale)
+      lastMinuteMarkA = now;
+      Serial.print("Slot A elapsed minutes: "); Serial.println(elapsedMinutesA);
+    }
+  } else {
+    elapsedMinutesA = 0;
+    lastMinuteMarkA = now;
+  }
+  
+  if (Bcharge || Bdischarge || Bcycle) {
+    if (now - lastMinuteMarkB >= 60000) {
+      elapsedMinutesB += 60;
+      lastMinuteMarkB = now;
+      Serial.print("Slot B elapsed minutes: "); Serial.println(elapsedMinutesB);
+    }
+  } else {
+    elapsedMinutesB = 0;
+    lastMinuteMarkB = now;
+  }
+  
+  if (Ccharge || Cdischarge || Ccycle) {
+    if (now - lastMinuteMarkC >= 60000) {
+      elapsedMinutesC += 60;
+      lastMinuteMarkC = now;
+      Serial.print("Slot C elapsed minutes: "); Serial.println(elapsedMinutesC);
+    }
+  } else {
+    elapsedMinutesC = 0;
+    lastMinuteMarkC = now;
+  }
+  
+  if (Dcharge || Ddischarge || Dcycle) {
+    if (now - lastMinuteMarkD >= 60000) {
+      elapsedMinutesD += 60;
+      lastMinuteMarkD = now;
+      Serial.print("Slot D elapsed minutes: "); Serial.println(elapsedMinutesD);
+    }
+  } else {
+    elapsedMinutesD = 0;
+    lastMinuteMarkD = now;
+  }
+}
+
+void calculateCapacity(char slot, float current, unsigned long currentTime) {
+  unsigned long* lastTime;
+  float* lastCurrent;
   float* capacity;
   bool* tracking;
-
+  
   switch (slot) {
     case 'A': 
-      samples = samplesA;
-      sampleCount = &sampleCountA_cum;
+      lastTime = &lastCapTimeA;
+      lastCurrent = &lastCapCurrentA;
       capacity = &capacityA;
       tracking = &capacityTrackingA;
       break;
     case 'B':
-      samples = samplesB;
-      sampleCount = &sampleCountB_cum;
+      lastTime = &lastCapTimeB;
+      lastCurrent = &lastCapCurrentB;
       capacity = &capacityB;
       tracking = &capacityTrackingB;
       break;
     case 'C':
-      samples = samplesC;
-      sampleCount = &sampleCountC_cum;
+      lastTime = &lastCapTimeC;
+      lastCurrent = &lastCapCurrentC;
       capacity = &capacityC;
       tracking = &capacityTrackingC;
       break;
     case 'D':
-      samples = samplesD;
-      sampleCount = &sampleCountD_cum;
+      lastTime = &lastCapTimeD;
+      lastCurrent = &lastCapCurrentD;
       capacity = &capacityD;
       tracking = &capacityTrackingD;
       break;
@@ -630,36 +613,30 @@ void calculateSimpsonCapacity(char slot, float current, unsigned long currentTim
   
   if (isActive && !*tracking) {
     *tracking = true;
-    *sampleCount = 0;
+    *lastTime = currentTime;
+    *lastCurrent = abs(current);
     *capacity = 0;
     Serial.print("Slot "); Serial.print(slot); 
-    Serial.println(" Cumulative capacity tracking started");
+    Serial.println(" Capacity tracking started");
   }
   
   if (!isActive && *tracking) {
     *tracking = false;
-    *capacity = calculateCumulativeSimpson(samples, *sampleCount);
+    *lastTime = 0;
     Serial.print("Slot "); Serial.print(slot); 
-    Serial.print(" Cumulative tracking ended. Total: "); Serial.print(*capacity, 4); Serial.println(" mAh");
+    Serial.print(" Tracking ended. Total: "); Serial.print(*capacity, 1); Serial.println(" mAh");
   }
   
-  if (!*tracking) return;
-  if (*sampleCount < MAX_SAMPLES) {
-    samples[*sampleCount].time = currentTime;
-    samples[*sampleCount].current = abs(current);
-    (*sampleCount)++;
+  if (*tracking && *lastTime > 0 && currentTime > *lastTime) {
+    float dt = (currentTime - *lastTime) / 3600000.0;  // Convert to hours
+    float avgCurrent = (*lastCurrent + abs(current)) / 2.0;
+    *capacity += avgCurrent * dt;  // mAh
     
-    *capacity = calculateCumulativeSimpson(samples, *sampleCount);
-    
-    if (*sampleCount % 5 == 0) {
-      Serial.print("Slot "); Serial.print(slot);
-      Serial.print(" Cumulative capacity: "); Serial.print(*capacity, 4);
-      Serial.print(" mAh (samples: "); Serial.print(*sampleCount);
-      Serial.println(")");
-    }
-  } else {
-    Serial.print("Slot "); Serial.print(slot);
-    Serial.println(" WARNING: Sample buffer full!");
+    *lastTime = currentTime;
+    *lastCurrent = abs(current);
+  } else if (*tracking) {
+    *lastTime = currentTime;
+    *lastCurrent = abs(current);
   }
 }
 
@@ -667,26 +644,31 @@ void resetCapacity(char slot) {
   switch (slot) {
     case 'A': 
       capacityA = 0; 
-      sampleCountA_cum = 0;
+      lastCapTimeA = 0;
+      lastCapCurrentA = 0;
       capacityTrackingA = false;
       break;
     case 'B': 
       capacityB = 0; 
-      sampleCountB_cum = 0;
+      lastCapTimeB = 0;
+      lastCapCurrentB = 0;
       capacityTrackingB = false;
       break;
     case 'C': 
       capacityC = 0; 
-      sampleCountC_cum = 0;
+      lastCapTimeC = 0;
+      lastCapCurrentC = 0;
       capacityTrackingC = false;
       break;
     case 'D': 
       capacityD = 0; 
-      sampleCountD_cum = 0;
+      lastCapTimeD = 0;
+      lastCapCurrentD = 0;
       capacityTrackingD = false;
       break;
   }
 }
+
 void resetSlotBooleans(char slot) {
   switch (slot) {
     case 'A':
@@ -694,29 +676,88 @@ void resetSlotBooleans(char slot) {
       Adischarge = false;
       Acycle = false;
       resetCapacity('A');
+      elapsedMinutesA = 0;
+      lastMinuteMarkA = millis();
       break;
     case 'B':
       Bcharge = false;
       Bdischarge = false;
       Bcycle = false;
       resetCapacity('B');
+      elapsedMinutesB = 0;
+      lastMinuteMarkB = millis();
       break;
     case 'C':
       Ccharge = false;
       Cdischarge = false;
       Ccycle = false;
       resetCapacity('C');
+      elapsedMinutesC = 0;
+      lastMinuteMarkC = millis();
       break;
     case 'D':
       Dcharge = false;
       Ddischarge = false;
       Dcycle = false;
       resetCapacity('D');
+      elapsedMinutesD = 0;
+      lastMinuteMarkD = millis();
       break;
   }
 }
 
+void readAllSensors() {
+  unsigned long now = millis();
+  
+  if (now - lastSensorRead >= sensorReadInterval) {
+    switch(currentSensor) {
+      case 0: 
+        if (now - prevA >= interval) { 
+          prevA = now; 
+          readSensor(inaA, 'A'); 
+        }
+        currentSensor++; 
+        break;
+      case 1: 
+        if (now - prevB >= interval) { 
+          prevB = now; 
+          readSensor(inaB, 'B'); 
+        }
+        currentSensor++; 
+        break;
+      case 2: 
+        if (now - prevC >= interval) { 
+          prevC = now; 
+          readSensor(inaC, 'C'); 
+        }
+        currentSensor++; 
+        break;
+      case 3: 
+        if (now - prevD >= interval) { 
+          prevD = now; 
+          readSensor(inaD, 'D'); 
+        }
+        currentSensor = 0; 
+        break;
+    }
+    lastSensorRead = now;
+  }
+}
+
 void loop() {
+  // Add this block at the VERY BEGINNING of loop() to display current readings
+  static unsigned long lastSerialPrint = 0;
+  if (millis() - lastSerialPrint >= 2000) {  // Print every 2 seconds
+    lastSerialPrint = millis();
+    
+    Serial.println("\n--- CURRENT READINGS ---");
+    Serial.print("Slot A - Voltage: "); Serial.print(voltageA, 2); Serial.print(" V, Current: "); Serial.print(currentA, 0); Serial.println(" mA");
+    Serial.print("Slot B - Voltage: "); Serial.print(voltageB, 2); Serial.print(" V, Current: "); Serial.print(currentB, 0); Serial.println(" mA");
+    Serial.print("Slot C - Voltage: "); Serial.print(voltageC, 2); Serial.print(" V, Current: "); Serial.print(currentC, 0); Serial.println(" mA");
+    Serial.print("Slot D - Voltage: "); Serial.print(voltageD, 2); Serial.print(" V, Current: "); Serial.print(currentD, 0); Serial.println(" mA");
+    Serial.println("------------------------\n");
+  }
+
   char key = keypad.getKey();
   unsigned long now = millis();
 
@@ -727,6 +768,13 @@ void loop() {
   checkTCPClient();
   handleTCPCommands();
 
+  // Update elapsed time
+  updateElapsedTime();
+
+  // Read sensors efficiently
+  readAllSensors();
+
+  // Status display update (less frequent)
   if (millis() - previousStatusTime >= statusInterval) {
     previousStatusTime = millis();
     Serial.print("Wi-Fi: ");
@@ -743,36 +791,13 @@ void loop() {
     }
   }
 
-  if (now - prevA >= interval) { 
-    prevA = now; 
-    readSensor(inaA, 'A'); 
-  }
-  if (now - prevB >= interval) { 
-    prevB = now; 
-    readSensor(inaB, 'B'); 
-  }
-  if (now - prevC >= interval) { 
-    prevC = now; 
-    readSensor(inaC, 'C'); 
-  }
-  if (now - prevD >= interval) { 
-    prevD = now; 
-    readSensor(inaD, 'D'); 
-  }
   if (stopMessageActive) {
     if (millis() - stopMessageStart >= stopMessageDuration) {
         stopMessageActive = false;
-
-        switch (previousSlot) {
-          case 'A': readSensor(inaA, 'A'); break;
-          case 'B': readSensor(inaB, 'B'); break;
-          case 'C': readSensor(inaC, 'C'); break;
-          case 'D': readSensor(inaD, 'D'); break;
-        }
-
         showSlot(previousSlot);
     }
   }
+  
   processDeferredDischarge();
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -789,41 +814,11 @@ void loop() {
       gsheetReadyOnce = true;
     }
   }
-  if (AdischargePending && battNumA > 0) {
-    logSlotToSheet(SHEET_ID_A, statusA, battNumA, elapsedA, voltageA, currentA, capacityA, Acycle, Adischarge ? "Discharge" : (Acharge ? "Charge" : "None"));
-    Serial.println("Force Log: Slot A");
-    AdischargePending = false;
-  }
-  if (BdischargePending && battNumB > 0) {
-    logSlotToSheet(SHEET_ID_B, statusB, battNumB, elapsedB, voltageB, currentB, capacityB, Bcycle, Bdischarge ? "Discharge" : (Bcharge ? "Charge" : "None"));
-    Serial.println("Force Log: Slot B");
-    BdischargePending = false;
-  }
-  if (CdischargePending && battNumC > 0) {
-    logSlotToSheet(SHEET_ID_C, statusC, battNumC, elapsedC, voltageC, currentC, capacityC, Ccycle, Cdischarge ? "Discharge" : (Ccharge ? "Charge" : "None"));
-    Serial.println("Force Log: Slot C");
-    CdischargePending = false;
-  }
-  if (DdischargePending && battNumD > 0) {
-    logSlotToSheet(SHEET_ID_D, statusD, battNumD, elapsedD, voltageD, currentD, capacityD, Dcycle, Ddischarge ? "Discharge" : (Dcharge ? "Charge" : "None"));
-    Serial.println("Force Log: Slot D");
-    DdischargePending = false;
-  }
-  bool Aactive = (battNumA > 0) && (Acharge || Adischarge || Acycle);
   
-  static bool lastAactive = false;
-  if (Aactive && !lastAactive) {
-    elapsedA = 0;
-    lastLogA = now;
-  }
-  lastAactive = Aactive;
-
+  // Periodic Google Sheets logging (every minute)
+  bool Aactive = (battNumA > 0) && (Acharge || Adischarge || Acycle);
   if (Aactive && (now - lastLogA >= logInterval)) {
     lastLogA = now;
-
-    bool present = (voltageA > 2.0);
-    if (!present) elapsedA = 0;
-
     if (GSheet.ready()) {
       const char* opMode = "None";
       if (Acycle) {
@@ -833,29 +828,13 @@ void loop() {
       } else if (Adischarge) {
         opMode = "Discharge";
       }
-      
-      logSlotToSheet(SHEET_ID_A, statusA, battNumA, elapsedA, voltageA, currentA, capacityA, Acycle, opMode);
+      logSlotToSheet(SHEET_ID_A, statusA, battNumA, elapsedMinutesA, voltageA, currentA, capacityA, Acycle, opMode);
     }
-
-    elapsedA += 60;
-  } else if (!Aactive) {
-    elapsedA = 0;
   }
-  bool Bactive = (battNumB > 0) && (Bcharge || Bdischarge || Bcycle);
   
-  static bool lastBactive = false;
-  if (Bactive && !lastBactive) {
-    elapsedB = 0;
-    lastLogB = now;
-  }
-  lastBactive = Bactive;
-
+  bool Bactive = (battNumB > 0) && (Bcharge || Bdischarge || Bcycle);
   if (Bactive && (now - lastLogB >= logInterval)) {
     lastLogB = now;
-
-    bool present = (voltageB > 2.0);
-    if (!present) elapsedB = 0;
-
     if (GSheet.ready()) {
       const char* opMode = "None";
       if (Bcycle) {
@@ -865,29 +844,13 @@ void loop() {
       } else if (Bdischarge) {
         opMode = "Discharge";
       }
-      
-      logSlotToSheet(SHEET_ID_B, statusB, battNumB, elapsedB, voltageB, currentB, capacityB, Bcycle, opMode);
+      logSlotToSheet(SHEET_ID_B, statusB, battNumB, elapsedMinutesB, voltageB, currentB, capacityB, Bcycle, opMode);
     }
-
-    elapsedB += 60;
-  } else if (!Bactive) {
-    elapsedB = 0;
   }
-  bool Cactive = (battNumC > 0) && (Ccharge || Cdischarge || Ccycle);
   
-  static bool lastCactive = false;
-  if (Cactive && !lastCactive) {
-    elapsedC = 0;
-    lastLogC = now;
-  }
-  lastCactive = Cactive;
-
+  bool Cactive = (battNumC > 0) && (Ccharge || Cdischarge || Ccycle);
   if (Cactive && (now - lastLogC >= logInterval)) {
     lastLogC = now;
-
-    bool present = (voltageC > 2.0);
-    if (!present) elapsedC = 0;
-
     if (GSheet.ready()) {
       const char* opMode = "None";
       if (Ccycle) {
@@ -897,29 +860,13 @@ void loop() {
       } else if (Cdischarge) {
         opMode = "Discharge";
       }
-      
-      logSlotToSheet(SHEET_ID_C, statusC, battNumC, elapsedC, voltageC, currentC, capacityC, Ccycle, opMode);
+      logSlotToSheet(SHEET_ID_C, statusC, battNumC, elapsedMinutesC, voltageC, currentC, capacityC, Ccycle, opMode);
     }
-
-    elapsedC += 60;
-  } else if (!Cactive) {
-    elapsedC = 0;
   }
-  bool Dactive = (battNumD > 0) && (Dcharge || Ddischarge || Dcycle);
   
-  static bool lastDactive = false;
-  if (Dactive && !lastDactive) {
-    elapsedD = 0;
-    lastLogD = now;
-  }
-  lastDactive = Dactive;
-
+  bool Dactive = (battNumD > 0) && (Dcharge || Ddischarge || Dcycle);
   if (Dactive && (now - lastLogD >= logInterval)) {
     lastLogD = now;
-
-    bool present = (voltageD > 2.0);
-    if (!present) elapsedD = 0;
-
     if (GSheet.ready()) {
       const char* opMode = "None";
       if (Dcycle) {
@@ -929,14 +876,10 @@ void loop() {
       } else if (Ddischarge) {
         opMode = "Discharge";
       }
-      
-      logSlotToSheet(SHEET_ID_D, statusD, battNumD, elapsedD, voltageD, currentD, capacityD, Dcycle, opMode);
+      logSlotToSheet(SHEET_ID_D, statusD, battNumD, elapsedMinutesD, voltageD, currentD, capacityD, Dcycle, opMode);
     }
-
-    elapsedD += 60;
-  } else if (!Dactive) {
-    elapsedD = 0;
   }
+  
   if (!key) return;
 
   Serial.print("Key pressed: "); Serial.println(key);
@@ -960,24 +903,32 @@ void loop() {
           cycleTargetA = value; 
           cycleCountA = 0; 
           resetCapacity('A');
+          elapsedMinutesA = 0;
+          lastMinuteMarkA = millis();
           Serial.print("Slot A cycle target set to: "); Serial.println(value);
           break;
         case 'B': 
           cycleTargetB = value; 
           cycleCountB = 0;
           resetCapacity('B');
+          elapsedMinutesB = 0;
+          lastMinuteMarkB = millis();
           Serial.print("Slot B cycle target set to: "); Serial.println(value);
           break;
         case 'C': 
           cycleTargetC = value; 
           cycleCountC = 0;
           resetCapacity('C');
+          elapsedMinutesC = 0;
+          lastMinuteMarkC = millis();
           Serial.print("Slot C cycle target set to: "); Serial.println(value);
           break;
         case 'D': 
           cycleTargetD = value; 
           cycleCountD = 0;
           resetCapacity('D');
+          elapsedMinutesD = 0;
+          lastMinuteMarkD = millis();
           Serial.print("Slot D cycle target set to: "); Serial.println(value);
           break;
       }
@@ -1006,7 +957,6 @@ void loop() {
         v=voltageA; 
         c=currentA; 
         cap=capacityA;
-        elapsedA=0;
         battNum = battNumA;
       }
       else if (cycleSlot=='B') { 
@@ -1014,7 +964,6 @@ void loop() {
         v=voltageB; 
         c=currentB; 
         cap=capacityB;
-        elapsedB=0;
         battNum = battNumB;
       }
       else if (cycleSlot=='C') { 
@@ -1022,7 +971,6 @@ void loop() {
         v=voltageC; 
         c=currentC; 
         cap=capacityC;
-        elapsedC=0;
         battNum = battNumC;
       }
       else if (cycleSlot=='D') { 
@@ -1030,7 +978,6 @@ void loop() {
         v=voltageD; 
         c=currentD; 
         cap=capacityD;
-        elapsedD=0;
         battNum = battNumD;
       }
       
@@ -1049,7 +996,6 @@ void loop() {
       return;
     }
     else if (key == '*') {
-
       lcd.clear();
       lcd.setCursor(0,1);
       lcd.print("Cycle test CANCELLED");
@@ -1066,6 +1012,7 @@ void loop() {
     }
     return;
   }
+  
   if (inStopPrompt) {
     if (key == '0') { 
       stopOperation(previousSlot, true); 
@@ -1082,16 +1029,15 @@ void loop() {
   if (inSettingScreen) {
     if (key == '1') {
       if (battNumForSlot(previousSlot) > 0) {
-       
         updateSlotRelays(previousSlot, '1');
         
         char sheetId[50];
         float v = 0, c = 0, cap = 0;
         String status = "Charging";
-        if (previousSlot == 'A') { strcpy(sheetId, SHEET_ID_A); v = voltageA; c = currentA; cap = capacityA; elapsedA = 0; }
-        else if (previousSlot == 'B') { strcpy(sheetId, SHEET_ID_B); v = voltageB; c = currentB; cap = capacityB; elapsedB = 0; }
-        else if (previousSlot == 'C') { strcpy(sheetId, SHEET_ID_C); v = voltageC; c = currentC; cap = capacityC; elapsedC = 0; }
-        else if (previousSlot == 'D') { strcpy(sheetId, SHEET_ID_D); v = voltageD; c = currentD; cap = capacityD; elapsedD = 0; }
+        if (previousSlot == 'A') { strcpy(sheetId, SHEET_ID_A); v = voltageA; c = currentA; cap = capacityA; elapsedMinutesA = 0; lastMinuteMarkA = millis(); }
+        else if (previousSlot == 'B') { strcpy(sheetId, SHEET_ID_B); v = voltageB; c = currentB; cap = capacityB; elapsedMinutesB = 0; lastMinuteMarkB = millis(); }
+        else if (previousSlot == 'C') { strcpy(sheetId, SHEET_ID_C); v = voltageC; c = currentC; cap = capacityC; elapsedMinutesC = 0; lastMinuteMarkC = millis(); }
+        else if (previousSlot == 'D') { strcpy(sheetId, SHEET_ID_D); v = voltageD; c = currentD; cap = capacityD; elapsedMinutesD = 0; lastMinuteMarkD = millis(); }
         logSlotToSheet(sheetId, status, battNumForSlot(previousSlot), 0, v, c, cap, false, "Charge");
         
         inSettingScreen = false;
@@ -1151,10 +1097,10 @@ void loop() {
     }
     else if (key == '5') return;
   }
+  
   switch (key) {
     case '0': 
       if (previousSlot != '\0') {
- 
         bool isActive = false;
         switch (previousSlot) {
           case 'A': isActive = (Acharge || Adischarge || Acycle); break;
@@ -1167,7 +1113,6 @@ void loop() {
           showForceStopPrompt(previousSlot);
           inStopPrompt = true;
         } else {
-          
           lcd.clear();
           lcd.setCursor(0,1);
           lcd.print("No active operation");
@@ -1214,26 +1159,30 @@ int battNumForSlot(char slot) {
 void startDischargeWithDelay(char slot) {
   switch (slot) {
     case 'A':
-      elapsedA = 0;
-      AdischargePending = true;
+      elapsedMinutesA = 0;
+      lastMinuteMarkA = millis();
+      resetCapacity('A');
       AdischargeWait = true;
       AdischargeStart = millis();
       break;
     case 'B':
-      elapsedB = 0;
-      BdischargePending = true;
+      elapsedMinutesB = 0;
+      lastMinuteMarkB = millis();
+      resetCapacity('B');
       BdischargeWait = true;
       BdischargeStart = millis();
       break;
     case 'C':
-      elapsedC = 0;
-      CdischargePending = true;
+      elapsedMinutesC = 0;
+      lastMinuteMarkC = millis();
+      resetCapacity('C');
       CdischargeWait = true;
       CdischargeStart = millis();
       break;
     case 'D':
-      elapsedD = 0;
-      DdischargePending = true;
+      elapsedMinutesD = 0;
+      lastMinuteMarkD = millis();
+      resetCapacity('D');
       DdischargeWait = true;
       DdischargeStart = millis();
       break;
@@ -1246,7 +1195,8 @@ void startCycle(char slot) {
       Acycle = true;
       cycleCountA = 0;
       resetCapacity('A');
-
+      elapsedMinutesA = 0;
+      lastMinuteMarkA = millis();
       Acharge = true;
       digitalWrite(AMS, LOW);
       digitalWrite(ACD, HIGH);
@@ -1258,6 +1208,8 @@ void startCycle(char slot) {
       Bcycle = true;
       cycleCountB = 0;
       resetCapacity('B');
+      elapsedMinutesB = 0;
+      lastMinuteMarkB = millis();
       Bcharge = true;
       digitalWrite(BMS, LOW);
       digitalWrite(BCD, HIGH);
@@ -1269,6 +1221,8 @@ void startCycle(char slot) {
       Ccycle = true;
       cycleCountC = 0;
       resetCapacity('C');
+      elapsedMinutesC = 0;
+      lastMinuteMarkC = millis();
       Ccharge = true;
       digitalWrite(CMS, LOW);
       digitalWrite(CCD, HIGH);
@@ -1280,6 +1234,8 @@ void startCycle(char slot) {
       Dcycle = true;
       cycleCountD = 0;
       resetCapacity('D');
+      elapsedMinutesD = 0;
+      lastMinuteMarkD = millis();
       Dcharge = true;
       digitalWrite(DMS, LOW);
       digitalWrite(DCD, HIGH);
@@ -1360,11 +1316,18 @@ void readSensor(INA226 &sensor, char label) {
   else if (v > 0.0 && c < 0.0) status = "Charging";
   else status = "Unknown";
 
+  unsigned long elapsedMins = 0;
+  if (label == 'A') elapsedMins = elapsedMinutesA;
+  else if (label == 'B') elapsedMins = elapsedMinutesB;
+  else if (label == 'C') elapsedMins = elapsedMinutesC;
+  else if (label == 'D') elapsedMins = elapsedMinutesD;
+
   Serial.print("Slot "); Serial.print(label);
   Serial.print(" | Status = "); Serial.print(status);
   Serial.print(" | Batt No = "); Serial.print(bn);
   Serial.print(" | Voltage = "); Serial.print(v, 2); Serial.print(" V");
-  Serial.print(" | Current = "); Serial.print(c, 0); Serial.println(" mA");
+  Serial.print(" | Current = "); Serial.print(c, 0); Serial.print(" mA");
+  Serial.print(" | Elapsed = "); Serial.print(elapsedMins); Serial.println(" min");
 
   switch (label) {
     case 'A': voltageA=v; currentA=abs(c); statusA=status; checkVoltageLimit('A'); break;
@@ -1373,16 +1336,11 @@ void readSensor(INA226 &sensor, char label) {
     case 'D': voltageD=v; currentD=abs(c); statusD=status; checkVoltageLimit('D'); break;
   }
 
-  calculateSimpsonCapacity(label, c, millis());  
+  calculateCapacity(label, c, millis());  
 
   if (clientConnected) {
     sendSensorDataOverTCP(label);
-    
-    static int sampleCounter = 0;
-    sampleCounter++;
-    if (sampleCounter % 5 == 0) {
-      sendSimpsonDataOverTCP(label);
-    }
+    sendCapacityDataOverTCP(label);
   }
 
   if (previousSlot == label && !inSettingScreen && !inStopPrompt && !stopMessageActive && !inBattNumberInput && !inCycleInput && !confirmingCycle) {
@@ -1393,26 +1351,20 @@ void readSensor(INA226 &sensor, char label) {
 void checkVoltageLimit(char slot) {
   switch (slot) {
     case 'A': {
-      if (Acharge && (voltageA >= CHARGE_STOP_V || voltageA < 1 || currentA <= 100)) {
-
-        if (Acycle && battNumA > 0) {
-   
-          logSlotToSheet(SHEET_ID_A, "Charge Complete", battNumA, elapsedA, voltageA, currentA, capacityA, true, "Charge");
-          Serial.print("Slot A charge complete - Cumulative Capacity: "); Serial.print(capacityA, 4); Serial.println(" mAh");
-          
-          logSlotToSheet(SHEET_ID_A, "Simpson Capacity", battNumA, elapsedA, voltageA, currentA, capacityA, true, "Pre-Discharge");
-          Serial.println("Slot A - Logged Simpson capacity before discharge");
-        }
-        
+      if (Acharge && voltageA >= CHARGE_STOP_V) {
         Acharge = false;
-        if (Acycle) {
-          if (cycleCountA >= cycleTargetA - 1) {
+        
+        if (Acycle && battNumA > 0) {
+          logSlotToSheet(SHEET_ID_A, "Charge Complete", battNumA, elapsedMinutesA, voltageA, currentA, capacityA, true, "Charge");
+          Serial.print("Slot A charge complete - Capacity: "); Serial.print(capacityA, 1); Serial.println(" mAh");
+          
+          cycleCountA++;
+          
+          if (cycleCountA >= cycleTargetA) {
             Acycle = false;
             resetSlotRelays('A');
-            Serial.print("Slot A cycle COMPLETE - Stopped after charge cycle ");
-            Serial.println(cycleTargetA);
-            
-            logSlotToSheet(SHEET_ID_A, "Cycle Complete", battNumA, elapsedA, voltageA, currentA, capacityA, false, "Complete");
+            logSlotToSheet(SHEET_ID_A, "Cycle Complete", battNumA, elapsedMinutesA, voltageA, currentA, capacityA, false, "Complete");
+            Serial.println("Slot A cycle COMPLETE");
             
             if (previousSlot == 'A') {
               lcd.clear();
@@ -1427,72 +1379,65 @@ void checkVoltageLimit(char slot) {
               showSlot('A');
             }
           } else {
+            delay(1000); // Brief pause before discharge
             Adischarge = true;
             digitalWrite(AMS, LOW);
             digitalWrite(ACD, LOW);
-            Serial.print("Slot A cycle progress: Charge ");
-            Serial.print(cycleCountA + 1);
+            logSlotToSheet(SHEET_ID_A, "Discharge Start", battNumA, elapsedMinutesA, voltageA, currentA, capacityA, true, "Discharge");
+            Serial.print("Slot A cycle ");
+            Serial.print(cycleCountA);
             Serial.print("/");
             Serial.print(cycleTargetA);
-            Serial.println(" complete - Starting Discharge");
-            
-            logSlotToSheet(SHEET_ID_A, "Cycle Phase Change", battNumA, elapsedA, voltageA, currentA, capacityA, true, "Discharge");
+            Serial.println(" - Starting Discharge");
           }
         } else {
           resetSlotRelays('A');
+          logSlotToSheet(SHEET_ID_A, "Charge Complete", battNumA, elapsedMinutesA, voltageA, currentA, capacityA, false, "Complete");
+          Serial.println("Slot A charge completed.");
         }
-        Serial.println("Slot A charge completed.");
       }
-      if (Adischarge && (voltageA <= DISCHARGE_STOP_V || (voltageA < 1 && currentA == 0.0))) {
-        if (battNumA > 0) {
-          logSlotToSheet(SHEET_ID_A, "Discharge Complete", battNumA, elapsedA, voltageA, currentA, capacityA, Acycle, "Complete");
-          Serial.print("Slot A discharge complete - Cumulative Capacity: "); Serial.print(capacityA, 4); Serial.println(" mAh");
-          
-          logSlotToSheet(SHEET_ID_A, "Simpson Capacity", battNumA, elapsedA, voltageA, currentA, capacityA, true, "Pre-Charge");
-          Serial.println("Slot A - Logged Simpson capacity before charge");
-        }
-        
+      
+      if (Adischarge && voltageA <= DISCHARGE_STOP_V) {
         Adischarge = false;
         AdischargePending = false;
-        if (Acycle) {
-          cycleCountA++;
+        
+        if (Acycle && battNumA > 0) {
+          logSlotToSheet(SHEET_ID_A, "Discharge Complete", battNumA, elapsedMinutesA, voltageA, currentA, capacityA, true, "Discharge");
+          Serial.print("Slot A discharge complete - Capacity: "); Serial.print(capacityA, 1); Serial.println(" mAh");
           
+          delay(1000); // Brief pause before charge
           Acharge = true;
           digitalWrite(AMS, LOW);
           digitalWrite(ACD, HIGH);
-          Serial.print("Slot A discharge ");
+          logSlotToSheet(SHEET_ID_A, "Charge Start", battNumA, elapsedMinutesA, voltageA, currentA, capacityA, true, "Charge");
+          Serial.print("Slot A cycle ");
           Serial.print(cycleCountA);
           Serial.print("/");
           Serial.print(cycleTargetA);
-          Serial.println(" complete - Starting Charge");
-          
-          logSlotToSheet(SHEET_ID_A, "Cycle Phase Change", battNumA, elapsedA, voltageA, currentA, capacityA, true, "Charge");
+          Serial.println(" - Starting Charge");
         } else {
           resetSlotRelays('A');
+          logSlotToSheet(SHEET_ID_A, "Discharge Complete", battNumA, elapsedMinutesA, voltageA, currentA, capacityA, false, "Complete");
+          Serial.println("Slot A discharge completed.");
         }
-        Serial.println("Slot A discharge completed.");
       }
     } break;
 
     case 'B': {
-      if (Bcharge && (voltageB >= CHARGE_STOP_V || voltageB < 1 || currentB <= 100)) {
-        if (Bcycle && battNumB > 0) {
-          logSlotToSheet(SHEET_ID_B, "Charge Complete", battNumB, elapsedB, voltageB, currentB, capacityB, true, "Charge");
-          Serial.print("Slot B charge complete - Cumulative Capacity: "); Serial.print(capacityB, 4); Serial.println(" mAh");
-          
-          logSlotToSheet(SHEET_ID_B, "Simpson Capacity", battNumB, elapsedB, voltageB, currentB, capacityB, true, "Pre-Discharge");
-          Serial.println("Slot B - Logged Simpson capacity before discharge");
-        }
-        
+      if (Bcharge && voltageB >= CHARGE_STOP_V) {
         Bcharge = false;
-        if (Bcycle) {
-          if (cycleCountB >= cycleTargetB - 1) {
+        
+        if (Bcycle && battNumB > 0) {
+          logSlotToSheet(SHEET_ID_B, "Charge Complete", battNumB, elapsedMinutesB, voltageB, currentB, capacityB, true, "Charge");
+          Serial.print("Slot B charge complete - Capacity: "); Serial.print(capacityB, 1); Serial.println(" mAh");
+          
+          cycleCountB++;
+          
+          if (cycleCountB >= cycleTargetB) {
             Bcycle = false;
             resetSlotRelays('B');
-            Serial.print("Slot B cycle COMPLETE - Stopped after charge cycle ");
-            Serial.println(cycleTargetB);
-            
-            logSlotToSheet(SHEET_ID_B, "Cycle Complete", battNumB, elapsedB, voltageB, currentB, capacityB, false, "Complete");
+            logSlotToSheet(SHEET_ID_B, "Cycle Complete", battNumB, elapsedMinutesB, voltageB, currentB, capacityB, false, "Complete");
+            Serial.println("Slot B cycle COMPLETE");
             
             if (previousSlot == 'B') {
               lcd.clear();
@@ -1507,72 +1452,65 @@ void checkVoltageLimit(char slot) {
               showSlot('B');
             }
           } else {
+            delay(1000);
             Bdischarge = true;
             digitalWrite(BMS, LOW);
             digitalWrite(BCD, LOW);
-            Serial.print("Slot B cycle progress: Charge ");
-            Serial.print(cycleCountB + 1);
+            logSlotToSheet(SHEET_ID_B, "Discharge Start", battNumB, elapsedMinutesB, voltageB, currentB, capacityB, true, "Discharge");
+            Serial.print("Slot B cycle ");
+            Serial.print(cycleCountB);
             Serial.print("/");
             Serial.print(cycleTargetB);
-            Serial.println(" complete - Starting Discharge");
-            
-            logSlotToSheet(SHEET_ID_B, "Cycle Phase Change", battNumB, elapsedB, voltageB, currentB, capacityB, true, "Discharge");
+            Serial.println(" - Starting Discharge");
           }
         } else {
           resetSlotRelays('B');
+          logSlotToSheet(SHEET_ID_B, "Charge Complete", battNumB, elapsedMinutesB, voltageB, currentB, capacityB, false, "Complete");
+          Serial.println("Slot B charge completed.");
         }
-        Serial.println("Slot B charge completed.");
       }
-      if (Bdischarge && (voltageB <= DISCHARGE_STOP_V || (voltageB < 1 && currentB == 0.0))) {
-        if (battNumB > 0) {
-          logSlotToSheet(SHEET_ID_B, "Discharge Complete", battNumB, elapsedB, voltageB, currentB, capacityB, Bcycle, "Complete");
-          Serial.print("Slot B discharge complete - Cumulative Capacity: "); Serial.print(capacityB, 4); Serial.println(" mAh");
-          
-          logSlotToSheet(SHEET_ID_B, "Simpson Capacity", battNumB, elapsedB, voltageB, currentB, capacityB, true, "Pre-Charge");
-          Serial.println("Slot B - Logged Simpson capacity before charge");
-        }
-        
+      
+      if (Bdischarge && voltageB <= DISCHARGE_STOP_V) {
         Bdischarge = false;
         BdischargePending = false;
-        if (Bcycle) {
-          cycleCountB++;
+        
+        if (Bcycle && battNumB > 0) {
+          logSlotToSheet(SHEET_ID_B, "Discharge Complete", battNumB, elapsedMinutesB, voltageB, currentB, capacityB, true, "Discharge");
+          Serial.print("Slot B discharge complete - Capacity: "); Serial.print(capacityB, 1); Serial.println(" mAh");
+          
+          delay(1000);
           Bcharge = true;
           digitalWrite(BMS, LOW);
           digitalWrite(BCD, HIGH);
-          Serial.print("Slot B discharge ");
+          logSlotToSheet(SHEET_ID_B, "Charge Start", battNumB, elapsedMinutesB, voltageB, currentB, capacityB, true, "Charge");
+          Serial.print("Slot B cycle ");
           Serial.print(cycleCountB);
           Serial.print("/");
           Serial.print(cycleTargetB);
-          Serial.println(" complete - Starting Charge");
-          
-          logSlotToSheet(SHEET_ID_B, "Cycle Phase Change", battNumB, elapsedB, voltageB, currentB, capacityB, true, "Charge");
+          Serial.println(" - Starting Charge");
         } else {
           resetSlotRelays('B');
+          logSlotToSheet(SHEET_ID_B, "Discharge Complete", battNumB, elapsedMinutesB, voltageB, currentB, capacityB, false, "Complete");
+          Serial.println("Slot B discharge completed.");
         }
-        Serial.println("Slot B discharge completed.");
       }
     } break;
 
     case 'C': {
-      if (Ccharge && (voltageC >= CHARGE_STOP_V || voltageC < 1 || currentC <= 100)) {
-
-        if (Ccycle && battNumC > 0) {
-          logSlotToSheet(SHEET_ID_C, "Charge Complete", battNumC, elapsedC, voltageC, currentC, capacityC, true, "Charge");
-          Serial.print("Slot C charge complete - Cumulative Capacity: "); Serial.print(capacityC, 4); Serial.println(" mAh");
-          
-          logSlotToSheet(SHEET_ID_C, "Simpson Capacity", battNumC, elapsedC, voltageC, currentC, capacityC, true, "Pre-Discharge");
-          Serial.println("Slot C - Logged Simpson capacity before discharge");
-        }
-        
+      if (Ccharge && voltageC >= CHARGE_STOP_V) {
         Ccharge = false;
-        if (Ccycle) {
-          if (cycleCountC >= cycleTargetC - 1) {
+        
+        if (Ccycle && battNumC > 0) {
+          logSlotToSheet(SHEET_ID_C, "Charge Complete", battNumC, elapsedMinutesC, voltageC, currentC, capacityC, true, "Charge");
+          Serial.print("Slot C charge complete - Capacity: "); Serial.print(capacityC, 1); Serial.println(" mAh");
+          
+          cycleCountC++;
+          
+          if (cycleCountC >= cycleTargetC) {
             Ccycle = false;
             resetSlotRelays('C');
-            Serial.print("Slot C cycle COMPLETE - Stopped after charge cycle ");
-            Serial.println(cycleTargetC);
-            
-            logSlotToSheet(SHEET_ID_C, "Cycle Complete", battNumC, elapsedC, voltageC, currentC, capacityC, false, "Complete");
+            logSlotToSheet(SHEET_ID_C, "Cycle Complete", battNumC, elapsedMinutesC, voltageC, currentC, capacityC, false, "Complete");
+            Serial.println("Slot C cycle COMPLETE");
             
             if (previousSlot == 'C') {
               lcd.clear();
@@ -1587,73 +1525,65 @@ void checkVoltageLimit(char slot) {
               showSlot('C');
             }
           } else {
+            delay(1000);
             Cdischarge = true;
             digitalWrite(CMS, LOW);
             digitalWrite(CCD, LOW);
-            Serial.print("Slot C cycle progress: Charge ");
-            Serial.print(cycleCountC + 1);
+            logSlotToSheet(SHEET_ID_C, "Discharge Start", battNumC, elapsedMinutesC, voltageC, currentC, capacityC, true, "Discharge");
+            Serial.print("Slot C cycle ");
+            Serial.print(cycleCountC);
             Serial.print("/");
             Serial.print(cycleTargetC);
-            Serial.println(" complete - Starting Discharge");
-            
-            logSlotToSheet(SHEET_ID_C, "Cycle Phase Change", battNumC, elapsedC, voltageC, currentC, capacityC, true, "Discharge");
+            Serial.println(" - Starting Discharge");
           }
         } else {
           resetSlotRelays('C');
+          logSlotToSheet(SHEET_ID_C, "Charge Complete", battNumC, elapsedMinutesC, voltageC, currentC, capacityC, false, "Complete");
+          Serial.println("Slot C charge completed.");
         }
-        Serial.println("Slot C charge completed.");
       }
-      if (Cdischarge && (voltageC <= DISCHARGE_STOP_V || (voltageC < 1 && currentC == 0.0))) {
-
-        if (battNumC > 0) {
-          logSlotToSheet(SHEET_ID_C, "Discharge Complete", battNumC, elapsedC, voltageC, currentC, capacityC, Ccycle, "Complete");
-          Serial.print("Slot C discharge complete - Cumulative Capacity: "); Serial.print(capacityC, 4); Serial.println(" mAh");
-
-          logSlotToSheet(SHEET_ID_C, "Simpson Capacity", battNumC, elapsedC, voltageC, currentC, capacityC, true, "Pre-Charge");
-          Serial.println("Slot C - Logged Simpson capacity before charge");
-        }
-        
+      
+      if (Cdischarge && voltageC <= DISCHARGE_STOP_V) {
         Cdischarge = false;
         CdischargePending = false;
-        if (Ccycle) {
-          cycleCountC++;
+        
+        if (Ccycle && battNumC > 0) {
+          logSlotToSheet(SHEET_ID_C, "Discharge Complete", battNumC, elapsedMinutesC, voltageC, currentC, capacityC, true, "Discharge");
+          Serial.print("Slot C discharge complete - Capacity: "); Serial.print(capacityC, 1); Serial.println(" mAh");
+          
+          delay(1000);
           Ccharge = true;
           digitalWrite(CMS, LOW);
           digitalWrite(CCD, HIGH);
-          Serial.print("Slot C discharge ");
+          logSlotToSheet(SHEET_ID_C, "Charge Start", battNumC, elapsedMinutesC, voltageC, currentC, capacityC, true, "Charge");
+          Serial.print("Slot C cycle ");
           Serial.print(cycleCountC);
           Serial.print("/");
           Serial.print(cycleTargetC);
-          Serial.println(" complete - Starting Charge");
-          
-          logSlotToSheet(SHEET_ID_C, "Cycle Phase Change", battNumC, elapsedC, voltageC, currentC, capacityC, true, "Charge");
+          Serial.println(" - Starting Charge");
         } else {
           resetSlotRelays('C');
+          logSlotToSheet(SHEET_ID_C, "Discharge Complete", battNumC, elapsedMinutesC, voltageC, currentC, capacityC, false, "Complete");
+          Serial.println("Slot C discharge completed.");
         }
-        Serial.println("Slot C discharge completed.");
       }
     } break;
 
     case 'D': {
-      if (Dcharge && (voltageD >= CHARGE_STOP_V || voltageD < 1 || currentD <= 100)) {
-
-        if (Dcycle && battNumD > 0) {
-          logSlotToSheet(SHEET_ID_D, "Charge Complete", battNumD, elapsedD, voltageD, currentD, capacityD, true, "Charge");
-          Serial.print("Slot D charge complete - Cumulative Capacity: "); Serial.print(capacityD, 4); Serial.println(" mAh");
-
-          logSlotToSheet(SHEET_ID_D, "Simpson Capacity", battNumD, elapsedD, voltageD, currentD, capacityD, true, "Pre-Discharge");
-          Serial.println("Slot D - Logged Simpson capacity before discharge");
-        }
-        
+      if (Dcharge && voltageD >= CHARGE_STOP_V) {
         Dcharge = false;
-        if (Dcycle) {
-          if (cycleCountD >= cycleTargetD - 1) {
+        
+        if (Dcycle && battNumD > 0) {
+          logSlotToSheet(SHEET_ID_D, "Charge Complete", battNumD, elapsedMinutesD, voltageD, currentD, capacityD, true, "Charge");
+          Serial.print("Slot D charge complete - Capacity: "); Serial.print(capacityD, 1); Serial.println(" mAh");
+          
+          cycleCountD++;
+          
+          if (cycleCountD >= cycleTargetD) {
             Dcycle = false;
             resetSlotRelays('D');
-            Serial.print("Slot D cycle COMPLETE - Stopped after charge cycle ");
-            Serial.println(cycleTargetD);
-            
-            logSlotToSheet(SHEET_ID_D, "Cycle Complete", battNumD, elapsedD, voltageD, currentD, capacityD, false, "Complete");
+            logSlotToSheet(SHEET_ID_D, "Cycle Complete", battNumD, elapsedMinutesD, voltageD, currentD, capacityD, false, "Complete");
+            Serial.println("Slot D cycle COMPLETE");
             
             if (previousSlot == 'D') {
               lcd.clear();
@@ -1668,50 +1598,47 @@ void checkVoltageLimit(char slot) {
               showSlot('D');
             }
           } else {
+            delay(1000);
             Ddischarge = true;
             digitalWrite(DMS, LOW);
             digitalWrite(DCD, LOW);
-            Serial.print("Slot D cycle progress: Charge ");
-            Serial.print(cycleCountD + 1);
+            logSlotToSheet(SHEET_ID_D, "Discharge Start", battNumD, elapsedMinutesD, voltageD, currentD, capacityD, true, "Discharge");
+            Serial.print("Slot D cycle ");
+            Serial.print(cycleCountD);
             Serial.print("/");
             Serial.print(cycleTargetD);
-            Serial.println(" complete - Starting Discharge");
-            
-            logSlotToSheet(SHEET_ID_D, "Cycle Phase Change", battNumD, elapsedD, voltageD, currentD, capacityD, true, "Discharge");
+            Serial.println(" - Starting Discharge");
           }
         } else {
           resetSlotRelays('D');
+          logSlotToSheet(SHEET_ID_D, "Charge Complete", battNumD, elapsedMinutesD, voltageD, currentD, capacityD, false, "Complete");
+          Serial.println("Slot D charge completed.");
         }
-        Serial.println("Slot D charge completed.");
       }
-      if (Ddischarge && (voltageD <= DISCHARGE_STOP_V || (voltageD < 1 && currentD == 0.0))) {
-
-        if (battNumD > 0) {
-          logSlotToSheet(SHEET_ID_D, "Discharge Complete", battNumD, elapsedD, voltageD, currentD, capacityD, Dcycle, "Complete");
-          Serial.print("Slot D discharge complete - Cumulative Capacity: "); Serial.print(capacityD, 4); Serial.println(" mAh");
-
-          logSlotToSheet(SHEET_ID_D, "Simpson Capacity", battNumD, elapsedD, voltageD, currentD, capacityD, true, "Pre-Charge");
-          Serial.println("Slot D - Logged Simpson capacity before charge");
-        }
-        
+      
+      if (Ddischarge && voltageD <= DISCHARGE_STOP_V) {
         Ddischarge = false;
         DdischargePending = false;
-        if (Dcycle) {
-          cycleCountD++;
+        
+        if (Dcycle && battNumD > 0) {
+          logSlotToSheet(SHEET_ID_D, "Discharge Complete", battNumD, elapsedMinutesD, voltageD, currentD, capacityD, true, "Discharge");
+          Serial.print("Slot D discharge complete - Capacity: "); Serial.print(capacityD, 1); Serial.println(" mAh");
+          
+          delay(1000);
           Dcharge = true;
           digitalWrite(DMS, LOW);
           digitalWrite(DCD, HIGH);
-          Serial.print("Slot D discharge ");
+          logSlotToSheet(SHEET_ID_D, "Charge Start", battNumD, elapsedMinutesD, voltageD, currentD, capacityD, true, "Charge");
+          Serial.print("Slot D cycle ");
           Serial.print(cycleCountD);
           Serial.print("/");
           Serial.print(cycleTargetD);
-          Serial.println(" complete - Starting Charge");
-          
-          logSlotToSheet(SHEET_ID_D, "Cycle Phase Change", battNumD, elapsedD, voltageD, currentD, capacityD, true, "Charge");
+          Serial.println(" - Starting Charge");
         } else {
           resetSlotRelays('D');
+          logSlotToSheet(SHEET_ID_D, "Discharge Complete", battNumD, elapsedMinutesD, voltageD, currentD, capacityD, false, "Complete");
+          Serial.println("Slot D discharge completed.");
         }
-        Serial.println("Slot D discharge completed.");
       }
     } break;
   }
@@ -1784,6 +1711,12 @@ void showHome() {
 }
 
 void showSlot(char slot) {
+  if (slot == lastDisplayedSlot && millis() - lastLCDUpdate < lcdUpdateInterval) {
+    return;  // Skip update if too soon and same slot
+  }
+  
+  lastDisplayedSlot = slot;
+  lastLCDUpdate = millis();
 
   inSettingScreen = false;
   inStopPrompt = false;
@@ -1799,10 +1732,11 @@ void showSlot(char slot) {
   int bn = 0;
   String mode = "";
   String cycleInfo = "";
+  unsigned long elapsedMins = 0;
 
   switch (slot) {
     case 'A': 
-      v = voltageA; c = currentA; s = statusA; bn = battNumA; cap = capacityA;
+      v = voltageA; c = currentA; s = statusA; bn = battNumA; cap = capacityA; elapsedMins = elapsedMinutesA;
       if (Acharge) mode = "CHARGING";
       else if (Adischarge) mode = "DISCHARGING";
       else if (Acycle) mode = "CYCLE";
@@ -1812,7 +1746,7 @@ void showSlot(char slot) {
       }
       break;
     case 'B': 
-      v = voltageB; c = currentB; s = statusB; bn = battNumB; cap = capacityB;
+      v = voltageB; c = currentB; s = statusB; bn = battNumB; cap = capacityB; elapsedMins = elapsedMinutesB;
       if (Bcharge) mode = "CHARGING";
       else if (Bdischarge) mode = "DISCHARGING";
       else if (Bcycle) mode = "CYCLE";
@@ -1822,7 +1756,7 @@ void showSlot(char slot) {
       }
       break;
     case 'C': 
-      v = voltageC; c = currentC; s = statusC; bn = battNumC; cap = capacityC;
+      v = voltageC; c = currentC; s = statusC; bn = battNumC; cap = capacityC; elapsedMins = elapsedMinutesC;
       if (Ccharge) mode = "CHARGING";
       else if (Cdischarge) mode = "DISCHARGING";
       else if (Ccycle) mode = "CYCLE";
@@ -1832,7 +1766,7 @@ void showSlot(char slot) {
       }
       break;
     case 'D': 
-      v = voltageD; c = currentD; s = statusD; bn = battNumD; cap = capacityD;
+      v = voltageD; c = currentD; s = statusD; bn = battNumD; cap = capacityD; elapsedMins = elapsedMinutesD;
       if (Dcharge) mode = "CHARGING";
       else if (Ddischarge) mode = "DISCHARGING";
       else if (Dcycle) mode = "CYCLE";
@@ -1857,11 +1791,15 @@ void showSlot(char slot) {
     lcd.setCursor(10, 2); lcd.print(cycleInfo);
   }
 
+  // Modified line 3 - removed capacity display
   if (Acharge || Adischarge || Bcharge || Bdischarge || Ccharge || Cdischarge || Dcharge || Ddischarge) {
-    lcd.setCursor(0, 3); lcd.print("Cap:");
-    lcd.print(cap, 1);
-    lcd.print("mAh V:");
+    lcd.setCursor(0, 3); 
+    lcd.print("T:");
+    lcd.print(elapsedMins);
+    lcd.print(" V:");
     lcd.print(v, 2);
+    lcd.print(" C:");
+    lcd.print(c, 0);
   } else {
     lcd.setCursor(0, 3); lcd.print("V:"); lcd.print(v, 2); lcd.print(" C:"); lcd.print(c, 0);
   }
@@ -2085,29 +2023,41 @@ void processDeferredDischarge() {
   unsigned long now = millis();
 
   if (AdischargeWait && now - AdischargeStart >= 10000) {
-    AdischargeWait = false; AdischargePending = false; Adischarge = true;
-    digitalWrite(AMS, LOW); digitalWrite(ACD, LOW);
+    AdischargeWait = false;
+    Adischarge = true;
+    digitalWrite(AMS, LOW);
+    digitalWrite(ACD, LOW);
+    AdischargePending = true;
     Serial.println("Slot A DISCHARGE started after delay");
     showSlot('A');
   }
 
   if (BdischargeWait && now - BdischargeStart >= 10000) {
-    BdischargeWait = false; BdischargePending = false; Bdischarge = true;
-    digitalWrite(BMS, LOW); digitalWrite(BCD, LOW);
+    BdischargeWait = false;
+    Bdischarge = true;
+    digitalWrite(BMS, LOW);
+    digitalWrite(BCD, LOW);
+    BdischargePending = true;
     Serial.println("Slot B DISCHARGE started after delay");
     showSlot('B');
   }
 
   if (CdischargeWait && now - CdischargeStart >= 10000) {
-    CdischargeWait = false; CdischargePending = false; Cdischarge = true;
-    digitalWrite(CMS, LOW); digitalWrite(CCD, LOW);
+    CdischargeWait = false;
+    Cdischarge = true;
+    digitalWrite(CMS, LOW);
+    digitalWrite(CCD, LOW);
+    CdischargePending = true;
     Serial.println("Slot C DISCHARGE started after delay");
     showSlot('C');
   }
 
   if (DdischargeWait && now - DdischargeStart >= 10000) {
-    DdischargeWait = false; DdischargePending = false; Ddischarge = true;
-    digitalWrite(DMS, LOW); digitalWrite(DCD, LOW);
+    DdischargeWait = false;
+    Ddischarge = true;
+    digitalWrite(DMS, LOW);
+    digitalWrite(DCD, LOW);
+    DdischargePending = true;
     Serial.println("Slot D DISCHARGE started after delay");
     showSlot('D');
   }
@@ -2165,26 +2115,32 @@ void clearBattNum(char slot) {
 
 void stopOperation(char slot, bool fromForceStop) {
   String operation = "";
+  unsigned long finalElapsed = 0;
+  
   switch (slot) {
     case 'A': 
       if (Acharge) operation = "CHARGING";
       else if (Adischarge) operation = "DISCHARGING";
       else if (Acycle) operation = "CYCLE";
+      finalElapsed = elapsedMinutesA;
       break;
     case 'B': 
       if (Bcharge) operation = "CHARGING";
       else if (Bdischarge) operation = "DISCHARGING";
       else if (Bcycle) operation = "CYCLE";
+      finalElapsed = elapsedMinutesB;
       break;
     case 'C': 
       if (Ccharge) operation = "CHARGING";
       else if (Cdischarge) operation = "DISCHARGING";
       else if (Ccycle) operation = "CYCLE";
+      finalElapsed = elapsedMinutesC;
       break;
     case 'D': 
       if (Dcharge) operation = "CHARGING";
       else if (Ddischarge) operation = "DISCHARGING";
       else if (Dcycle) operation = "CYCLE";
+      finalElapsed = elapsedMinutesD;
       break;
   }
 
@@ -2211,7 +2167,7 @@ void stopOperation(char slot, bool fromForceStop) {
   }
   
   if (battNum > 0) {
-    logSlotToSheet(sheetId, "Force Stopped", battNum, 0, v, c, finalCapacity, false, "Stopped");
+    logSlotToSheet(sheetId, "Force Stopped", battNum, finalElapsed, v, c, finalCapacity, false, "Stopped");
   }
 
   lcd.clear();
@@ -2238,8 +2194,9 @@ void stopOperation(char slot, bool fromForceStop) {
   Serial.print("Slot "); Serial.print(slot); 
   Serial.print(" operation stopped. Was: "); Serial.println(operation);
   if (finalCapacity > 0) {
-    Serial.print("Final capacity: "); Serial.print(finalCapacity, 4); Serial.println(" mAh");
+    Serial.print("Final capacity: "); Serial.print(finalCapacity, 1); Serial.println(" mAh");
   }
+  Serial.print("Elapsed time: "); Serial.print(finalElapsed); Serial.println(" minutes");
 }
 
 void formatDateTime(const char* fmt, char* result, size_t size) {
@@ -2254,7 +2211,7 @@ void formatDateTime(const char* fmt, char* result, size_t size) {
 void logSlotToSheet(const char* sheetId,
                     const String& slotStatus,
                     int battNum,
-                    unsigned long elapsedSecs,
+                    unsigned long elapsedMinutes,
                     float voltage,
                     float current,
                     float capacity,
@@ -2275,17 +2232,19 @@ void logSlotToSheet(const char* sheetId,
     char voltageStr[10];
     char currentStr[10];
     char capacityStr[10];
+    char elapsedStr[10];
 
     dtostrf(voltage, 5, 2, voltageStr);
     dtostrf(current, 5, 0, currentStr);
-    dtostrf(capacity, 8, 4, capacityStr);
+    dtostrf(capacity, 8, 1, capacityStr);  // 1 decimal for simplicity
+    sprintf(elapsedStr, "%lu", elapsedMinutes);
 
     String finalStatus = slotStatus;
     
     if (strcmp(operationMode, "Pre-Discharge") == 0) {
-        finalStatus = "Simpson Capacity (Pre-Discharge)";
+        finalStatus = "Capacity (Pre-Discharge)";
     } else if (strcmp(operationMode, "Pre-Charge") == 0) {
-        finalStatus = "Simpson Capacity (Pre-Charge)";
+        finalStatus = "Capacity (Pre-Charge)";
     } else if (inCycle) {
         if (strcmp(operationMode, "Charge") == 0) {
             finalStatus = "Cycle-Charging";
@@ -2310,7 +2269,7 @@ void logSlotToSheet(const char* sheetId,
     valueRange.set("values/[0]/[0]", timeStamp);
     valueRange.set("values/[1]/[0]", finalStatus);
     valueRange.set("values/[2]/[0]", battNum);
-    valueRange.set("values/[3]/[0]", elapsedSecs);
+    valueRange.set("values/[3]/[0]", elapsedStr);  // Now in minutes (0, 60, 120, 180, etc.)
     valueRange.set("values/[4]/[0]", voltageStr);
     valueRange.set("values/[5]/[0]", currentStr);
     valueRange.set("values/[6]/[0]", capacityStr);  
@@ -2318,7 +2277,9 @@ void logSlotToSheet(const char* sheetId,
     Serial.print("Sending to Google Sheet ID: ");
     Serial.println(sheetId);
     Serial.print("Status: "); Serial.println(finalStatus);
-    Serial.print("Capacity: "); Serial.print(capacity, 4); Serial.println(" mAh (cumulative)");
+    Serial.print("Elapsed: "); Serial.print(elapsedMinutes); Serial.println(" minutes");
+    Serial.print("Current: "); Serial.print(current, 0); Serial.println(" mA");
+    Serial.print("Capacity: "); Serial.print(capacity, 1); Serial.println(" mAh");
 
     bool ok = GSheet.values.append(&response, sheetId, "Sheet1!A1:G1", &valueRange);
 
