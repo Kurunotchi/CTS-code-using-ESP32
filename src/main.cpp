@@ -9,8 +9,8 @@
 #include <ESP_Google_Sheet_Client.h>
 #include <ArduinoJson.h>  
 
-const char* ssid = "Kodicpogi21";
-const char* pass = "11123232";  
+const char* ssid = "Salamat Shopee";
+const char* pass = "wednesday";  
 
 WiFiServer tcpServer(8888);  
 WiFiClient client;
@@ -1962,7 +1962,7 @@ void printCentered(const char* text, int row) {
 void showHome() {
   lcd.clear();
   printCentered("Capacity Testing", 0);
-  printCentered("Station (CTS) V1.0", 1);
+  printCentered("Station (CTS) V2.0", 1);
   lcd.setCursor(0,3);
   if (WiFi.status() == WL_CONNECTED) lcd.print("  Wi-Fi: Connected  ");
   else lcd.print("Wi-Fi: Not Connected");
@@ -2056,10 +2056,10 @@ void showSlot(char slot) {
     lcd.print(elapsedMins);
     lcd.print(" V:");
     lcd.print(v, 2);
-    lcd.print(" C:");
+    lcd.print(" I:");
     lcd.print(c, 0);
   } else {
-    lcd.setCursor(0, 3); lcd.print("V:"); lcd.print(v, 2); lcd.print(" C:"); lcd.print(c, 0);
+    lcd.setCursor(0, 3); lcd.print("V:"); lcd.print(v, 2); lcd.print(" I:"); lcd.print(c, 0);
   }
 }
 
