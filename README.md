@@ -4,15 +4,15 @@
 **PSU_CTS** is an ESP32-based 4-slot battery capacity testing station designed for precise Li-ion battery testing. Each slot independently supports charging, discharging, and cycle testing with automatic voltage cutoffs, real-time monitoring, and data logging.
 
 **Key Features:**
-- ✅ 4 independent testing slots (A, B, C, D)
-- ✅ INA226 precision current/voltage sensors (calibrated per slot/mode)
-- ✅ LCD + 4x4 keypad for manual control
-- ✅ WiFi TCP server (port 8888) for Python dashboard
-- ✅ Google Sheets logging (1-minute intervals per slot)
-- ✅ Automatic capacity calculation (trapezoidal integration)
-- ✅ Cycle testing (user-defined cycles, auto charge-discharge)
-- ✅ Voltage limits: Charge stop 4.10V, Discharge stop 2.80V
-- ✅ Real-time Python GUI with Simpson's 1/3 rule capacity
+- 4 independent testing slots (A, B, C, D)
+- INA226 precision current/voltage sensors (calibrated per slot/mode)
+- LCD + 4x4 keypad for manual control
+- WiFi TCP server (port 8888) for Python dashboard
+- Google Sheets logging (1-minute intervals per slot)
+- Automatic capacity calculation (trapezoidal integration)
+- Cycle testing (user-defined cycles, auto charge-discharge)
+- Voltage limits: Charge stop 4.10V, Discharge stop 2.80V
+- Real-time Python GUI with Simpson's 1/3 rule capacity
 
 ## Hardware Requirements
 ```
